@@ -5,8 +5,14 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
+	"io/ioutil"
+	"os"
+	"os/exec"
+	"os/signal"
 	"path"
 	"strconv"
+	"syscall"
 
 	config "github.com/ipfs/go-ipfs/repo/config"
 	fsrepo "github.com/ipfs/go-ipfs/repo/fsrepo"
@@ -54,12 +60,12 @@ func identityConfig(nbits int) (config.Identity, error) {
 }
 
 func InitConfig(identity config.Identity, bootstrapPeers []config.BootstrapPeer,
-	swarmPort, apiPort, gwPort int) (*config.Config, error) {
+	swarmPort, apiPort, gwPort int, ipfs_mount_path, ipns_mount_path string) (*config.Config, error) {
 	return &config.Config{
 		Addresses: config.Addresses{
-			Swarm:   []string{fmt.Sprintf("/ip4/0.0.0.0/tcp/%v", swarmPort)},
-			API:     fmt.Sprintf("/ip4/0.0.0.0/tcp/%v", apiPort),
-			Gateway: fmt.Sprintf("/ip4/0.0.0.0/tcp/%v", gwPort),
+			Swarm:   []string{fmt.Sprintf("/ip4/127.0.0.1/tcp/%v", swarmPort)},
+			API:     fmt.Sprintf("/ip4/127.0.0.1/tcp/%v", apiPort),
+			Gateway: fmt.Sprintf("/ip4/127.0.0.1/tcp/%v", gwPort),
 		},
 
 		Bootstrap: config.BootstrapPeerStrings(bootstrapPeers),
@@ -72,8 +78,8 @@ func InitConfig(identity config.Identity, bootstrapPeers []config.BootstrapPeer,
 
 		// setup the node mount points.
 		Mounts: config.Mounts{
-			IPFS: "/ipfs",
-			IPNS: "/ipns",
+			IPFS: ipfs_mount_path,
+			IPNS: ipns_mount_path,
 		},
 
 		Ipns: config.Ipns{
@@ -89,6 +95,49 @@ func InitConfig(identity config.Identity, bootstrapPeers []config.BootstrapPeer,
 			Writable:     false,
 		},
 	}, nil
+}
+
+func runDaemon(repoPath string) (*exec.Cmd, io.ReadCloser, io.ReadCloser) {
+	ipfsbin, err := exec.LookPath("ipfs")
+	if err != nil {
+		panic(err)
+	}
+
+	cmd := exec.Command(ipfsbin, "daemon", "--writable")
+	env := os.Environ()
+	env = append(env, fmt.Sprintf("IPFS_PATH=%s", repoPath))
+	cmd.Env = env
+
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		panic(err)
+	}
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		panic(err)
+	}
+	err = cmd.Start()
+	if err != nil {
+		panic(err)
+	}
+
+	return cmd, stdout, stderr
+}
+
+func cleanupDaemon(cmd *exec.Cmd, stdout, stderr io.ReadCloser) {
+	cmd.Process.Signal(syscall.SIGINT)
+	fmt.Println("--------------------------------------")
+
+	out, _ := ioutil.ReadAll(stdout)
+	fmt.Println("STDOUT:")
+	fmt.Println(string(out))
+
+	out, _ = ioutil.ReadAll(stderr)
+	fmt.Println("STDERR:")
+	fmt.Println(string(out))
+
+	err := cmd.Wait()
+	fmt.Println("exiting daemon with status:", err)
 }
 
 func main() {
@@ -125,8 +174,10 @@ func main() {
 		}
 
 		fmt.Println("Initializing ipfs node at:", repoRoot)
+		ipfs_mount_path := path.Join(rootFolder, fmt.Sprintf("ipfs%v", i))
+		ipns_mount_path := path.Join(rootFolder, fmt.Sprintf("ipns%v", i))
 		conf, err := InitConfig(AllIdentities[i], bootstrapPeers, defaultSwarmPort+i,
-			defaultAPIPort+i, defaultGWPort+i)
+			defaultAPIPort+i, defaultGWPort+i, ipfs_mount_path, ipns_mount_path)
 		if err != nil {
 			panic(err)
 		}
@@ -136,4 +187,16 @@ func main() {
 		}
 		fmt.Println("Initialization complete for node", i)
 	}
+
+	// run ipfs daemons
+	for i := 0; i < nnodes; i++ {
+		repoPath := path.Join(rootFolder, strconv.Itoa(i))
+		defer cleanupDaemon(runDaemon(repoPath))
+		fmt.Println("Started node", i)
+	}
+
+	sigs := make(chan os.Signal, 1)
+	signal.Notify(sigs, syscall.SIGINT)
+	<-sigs
+	fmt.Println("cleaning up ...")
 }
