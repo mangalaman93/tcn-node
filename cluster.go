@@ -147,45 +147,47 @@ func main() {
 	flag.StringVar(&rootFolder, "p", ".tcn", "root folder to place all the ipfs content")
 	flag.Parse()
 
-	// generate the list of default peers
 	BootstrapAddresses := []string{}
 	AllIdentities := []config.Identity{}
-	for i := 0; i < nnodes; i++ {
-		identity, err := identityConfig(nBitsForKeypairDefault)
+	if _, err := os.Stat(rootFolder); err == nil {
+		for i := 0; i < nnodes; i++ {
+			repoRoot := path.Join(rootFolder, strconv.Itoa(i))
+			if !fsrepo.IsInitialized(repoRoot) {
+				panic(fmt.Sprintf("Node %v is not initialized", i))
+			}
+		}
+	} else {
+		for i := 0; i < nnodes; i++ {
+			identity, err := identityConfig(nBitsForKeypairDefault)
+			if err != nil {
+				panic(err)
+			}
+
+			peer := fmt.Sprintf("/ip4/127.0.0.1/tcp/%v/ipfs/%s", defaultSwarmPort+i, identity.PeerID)
+			BootstrapAddresses = append(BootstrapAddresses, peer)
+			AllIdentities = append(AllIdentities, identity)
+		}
+
+		bootstrapPeers, err := config.ParseBootstrapPeers(BootstrapAddresses)
 		if err != nil {
 			panic(err)
 		}
 
-		peer := fmt.Sprintf("/ip4/127.0.0.1/tcp/%v/ipfs/%s", defaultSwarmPort+i, identity.PeerID)
-		BootstrapAddresses = append(BootstrapAddresses, peer)
-		AllIdentities = append(AllIdentities, identity)
-	}
+		for i := 0; i < nnodes; i++ {
+			repoRoot := path.Join(rootFolder, strconv.Itoa(i))
+			ipfs_mount_path := path.Join(rootFolder, fmt.Sprintf("ipfs%v", i))
+			ipns_mount_path := path.Join(rootFolder, fmt.Sprintf("ipns%v", i))
+			conf, err := InitConfig(AllIdentities[i], bootstrapPeers, defaultSwarmPort+i,
+				defaultAPIPort+i, defaultGWPort+i, ipfs_mount_path, ipns_mount_path)
+			if err != nil {
+				panic(err)
+			}
 
-	bootstrapPeers, err := config.ParseBootstrapPeers(BootstrapAddresses)
-	if err != nil {
-		panic(err)
-	}
-
-	for i := 0; i < nnodes; i++ {
-		fmt.Println("Setting up config for node", i)
-		repoRoot := path.Join(rootFolder, strconv.Itoa(i))
-		if fsrepo.IsInitialized(repoRoot) {
-			panic(fmt.Sprintf("Node %v already initialized", i))
+			if err := fsrepo.Init(repoRoot, conf); err != nil {
+				panic(err)
+			}
+			fmt.Println("Initialized ipfs node at:", repoRoot)
 		}
-
-		fmt.Println("Initializing ipfs node at:", repoRoot)
-		ipfs_mount_path := path.Join(rootFolder, fmt.Sprintf("ipfs%v", i))
-		ipns_mount_path := path.Join(rootFolder, fmt.Sprintf("ipns%v", i))
-		conf, err := InitConfig(AllIdentities[i], bootstrapPeers, defaultSwarmPort+i,
-			defaultAPIPort+i, defaultGWPort+i, ipfs_mount_path, ipns_mount_path)
-		if err != nil {
-			panic(err)
-		}
-
-		if err := fsrepo.Init(repoRoot, conf); err != nil {
-			panic(err)
-		}
-		fmt.Println("Initialization complete for node", i)
 	}
 
 	// run ipfs daemons
